@@ -115,7 +115,9 @@ async function main() {
   assert.ok(placed[0].briefing.includes('URGENT keys leaked'), 'title in the briefing');
   assert.ok(placed[0].briefing.includes('Web says: URGENT keys leaked'), 'context in the briefing');
   assert.ok(placed[0].briefing.includes('solo developer'), 'profile in the briefing');
-  assert.ok(placed[0].firstMessage.split(/\s+/).length < 30 && placed[0].firstMessage.startsWith("Hi, it's your desk."), 'first message: ' + placed[0].firstMessage);
+  assert.ok(placed[0].firstMessage.split(/\s+/).length < 70 && placed[0].firstMessage.startsWith("Hi, it's your desk."), 'first message: ' + placed[0].firstMessage);
+  // The opening must say something useful by itself (why it matters), not stop at a bare "Do you want the details?"
+  assert.ok(placed[0].firstMessage.includes('It is urgent.') && !/Do you want the details\?$/.test(placed[0].firstMessage), 'first message carries the reason: ' + placed[0].firstMessage);
   assert.ok(notices.length >= 1, 'desktop was notified');
   await waitFor(() => find(chief, 'URGENT keys leaked').status === 'called', 'event called');
   const c1 = chief.state().calls.find((c) => c.eventIds.length);

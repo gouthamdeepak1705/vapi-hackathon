@@ -59,7 +59,7 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
   const make = (what, fn) => { try { return fn(); } catch (e) { L(`cos: ${what} unavailable: ${e.message}`); return null; } };
   const cfg = mods.cfg || make('keys', () => require('./keys'));
   if (!cfg) throw new Error('cos settings unavailable');
-  const sources = mods.sources || ['github', 'plaid', 'watch'].map((n) => make(n, () => require('./sources/' + n)({ cfg, log: L }))).filter(Boolean);
+  const sources = mods.sources || ['github', 'plaid', 'watch', 'quotes'].map((n) => make(n, () => require('./sources/' + n)({ cfg, log: L }))).filter(Boolean);
   const jev = mods.jev || make('jev', () => require('./jev')({ cfg, log: L }));
   const exa = mods.exa || make('exa', () => require('./exa')({ cfg, log: L }));
   const vapi = mods.vapi || make('vapi', () => require('./vapi')({ cfg, log: L }));
@@ -120,7 +120,7 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
   const health = () => {
     const h = (m) => { try { return (m && m.health && m.health()) || 'off'; } catch (e) { return 'error: ' + clip(e.message, 40); } };
     const src = (name) => h(sources.find((s) => s && s.name === name));
-    return { github: src('github'), plaid: src('plaid'), watch: src('watch'), jev: h(jev), exa: h(exa), vapi: !vapi ? 'off' : noPhone() ? 'error: no phone number set' : h(vapi) };
+    return { github: src('github'), plaid: src('plaid'), watch: src('watch'), quotes: src('quotes'), jev: h(jev), exa: h(exa), vapi: !vapi ? 'off' : noPhone() ? 'error: no phone number set' : h(vapi) };
   };
 
   function snapshot() {
@@ -131,7 +131,7 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
       orders, mutes,
       ring: ring ? { id: ring.id, topic: ring.topic, reason: ring.webReason || ring.topic } : null,
       // vapiPublicKey is meant for browsers; the private vapiKey never goes in the state
-      settings: { threshold: threshold(), myPhoneSet: !!String(c.myPhone || '').trim(), ordersMode: ordersMode(), quietHours: String(c.quietHours || ''), watches: watchList(), dailyBriefing: dailyTime(), callMode: callMode(), vapiPublicKey: String(c.vapiPublicKey || '') },
+      settings: { threshold: threshold(), myPhoneSet: !!String(c.myPhone || '').trim(), ordersMode: ordersMode(), quietHours: String(c.quietHours || ''), watches: watchList(), dailyBriefing: dailyTime(), callMode: callMode(), tickers: Array.isArray(c.tickers) ? c.tickers.slice(0, 5) : [], moveAlertPct: Number(c.moveAlertPct) || 2, repos: Array.isArray(c.repos) ? c.repos.slice(0, 10) : [], watchMinutes: Number(c.watchMinutes) || 5, vapiPublicKey: String(c.vapiPublicKey || '') },
       health: health(),
     }));
   }
@@ -188,10 +188,40 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
   }
   const itemLine = (e) => `- ${clip(e.title, 140)} (${e.source}, urgency ${Math.round(e.score.urgency * 100)}%): ${clip(e.score.reason, 140)}`;
 
+  // What someone hears when they dial in: a short rundown by area, then they pick what to hear more about.
+  // Demo and test events are left out unless they are minutes old, so old test data never leads the call.
+  const headline = (e) => clip(String(e.title || '').replace(/^News on "[^"]*":\s*/, ''), 110);
+  function inboundAreas() {
+    const live = (e) => e.source !== 'demo' || now() - Date.parse(e.ts) < 10 * 60000;
+    const w = waitingItems().filter(live);
+    const by = (src) => w.filter((e) => src.includes(e.source));
+    return { markets: by(['quotes']), news: by(['watch']), agents: by(['agent']), github: by(['github']), cards: by(['plaid']), other: w.filter((e) => !['quotes', 'watch', 'agent', 'github', 'plaid'].includes(e.source)) };
+  }
+  function inboundOpening() {
+    const a = inboundAreas(), parts = [];
+    if (a.other.length) parts.push(`First, ${headline(a.other[0])}.`);
+    parts.push(a.markets.length ? `On the markets, ${a.markets.slice(0, 2).map((e) => e.title.replace(/ \(\$[\d,.]+\)$/, '')).join(' and ')}.` : 'The markets are quiet.');
+    if (a.news.length) parts.push(`Top headline: ${headline(a.news[0])}.`);
+    parts.push(a.agents.length ? `${clip(a.agents[0].title, 120)}.` : 'No coding agent has reported in.');
+    const built = a.github.filter((e) => e.kind === 'build_failed').length;
+    parts.push(built ? `${built} failed build${built > 1 ? 's' : ''} on GitHub.` : 'Nothing is broken on GitHub.');
+    parts.push("Gmail isn't connected yet. Which of these do you want more on?");
+    return clip(`Hi, it's your desk. Quick rundown. ${parts.join(' ')}`, 650);
+  }
   function inboundBriefing() {
-    const w = waitingItems().slice(0, 8);
+    const a = inboundAreas();
+    const sec = (name, list, empty) => [name + ':', ...(list.length ? list.slice(0, 4).map((e) => itemLine(e) + (e.detail && e.source === 'agent' ? ` Detail: ${clip(e.detail, 200)}` : '')) : ['- ' + empty])];
     const lastCall = calls.find((c) => c.status === 'done' && c.summary);
-    const out = [w.length ? 'Items waiting for the user, most urgent first:' : 'Nothing is waiting for the user right now.', ...w.map(itemLine)];
+    const out = [
+      'Brief the caller area by area, in this order. Opening line already said the rundown, so when they answer, go deeper on what they pick, or walk through the areas one at a time if they say "go on" or "everything".', '',
+      ...sec('MARKETS (prices of SPY and NVDA, moves of 2% or more)', a.markets, 'No big price moves.'), '',
+      ...sec('NEWS ON WATCHED TOPICS (NVIDIA, the S&P 500, Trump announcements)', a.news, 'Nothing new.'), '',
+      ...sec('CODING AGENTS (Claude Code and Codex)', a.agents, 'No coding agent has reported in, so say you have not heard from them. Do not guess what they are doing.'), '',
+      ...sec('GITHUB AND BUILDS', a.github, 'No failed builds or alerts.'), '',
+      ...sec('CARD CHARGES (sample data, not real money)', a.cards, 'No charges.'), '',
+      'GMAIL: not connected yet. Say that plainly if asked, and do not make up any email.',
+    ];
+    if (a.other.length) out.splice(2, 0, ...sec('NEEDS YOU FIRST', a.other, ''), '');
     if (lastCall) out.push('', 'Last call summary: ' + clip(lastCall.summary, 300));
     const p = profileText(); if (p) out.push('', 'About the user: ' + p);
     return out.join('\n');
@@ -199,12 +229,14 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
   function syncInbound() {
     if (!vapi || !vapi.syncInbound || stopped) return;
     try {
+      const opening = inboundOpening();
       const text = inboundBriefing();
-      if (text === lastSynced) return;
+      const key = opening + '\n' + text;
+      if (key === lastSynced) return;
       const wait = lastSyncAt + T.syncMs - now();
       if (wait > 0) { if (!syncTimer) syncTimer = setTimeout(() => { syncTimer = null; syncInbound(); }, wait); return; }
-      lastSynced = text; lastSyncAt = now();
-      Promise.resolve(vapi.syncInbound(text)).catch(() => {});
+      lastSynced = key; lastSyncAt = now();
+      Promise.resolve(vapi.syncInbound(text, opening)).catch(() => {});
     } catch (e) { L('cos: inbound sync failed: ' + e.message); }
   }
 
@@ -306,13 +338,20 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
     const p = profileText(); if (p) out.push('', 'About the user: ' + p);
     return out.join('\n');
   }
-  const FIRST = { build_failed: 'A build just failed', issue: 'An issue was just filed', security_alert: 'A security alert came in', charge: 'A charge you may not recognise', review_request: 'A review was requested', mention: 'You were mentioned' };
+  const FIRST = { build_failed: 'A build just failed', issue: 'An issue was just filed', security_alert: 'A security alert came in', charge: 'A charge you may not recognise', review_request: 'A review was requested', mention: 'You were mentioned', market_move: 'A big price move', agent_request: 'A coding agent needs you', custom: 'Something came up' };
   function buildFirstMessage(recs, topic, scheduled, daily) {
     const hi = "Hi, it's your desk.";
     if (daily) return `${hi} This is your daily briefing.`;
     if (scheduled) return `${hi} You asked me to call about ${clip(topic, 70) || 'something'}.`.replace(/about something\.$/, 'back.');
-    if (recs.length > 1) return `${hi} ${recs.length} things need you, starting with: ${clip(recs[0].title, 70)}. Is now a good time?`;
-    if (recs.length === 1) return `${hi} ${FIRST[recs[0].kind] || 'Something needs you'}: ${clip(recs[0].title, 80)}. Do you want the details?`;
+    // Say something useful straight away: the headline, why it matters and the first sentence of the detail.
+    // A bare "Do you want the details?" leaves the line silent until the person answers.
+    const why = (r) => { const w = clip(r.score && r.score.reason, 160); return w ? (/[.!?]$/.test(w) ? w : w + '.') : ''; };
+    const lead = (r) => {
+      const d = clip(r.detail, 400), i = d.search(/[.!?](\s|$)/), s = i > 0 && i < 220 ? d.slice(0, i + 1) : clip(d, 200);
+      return s && s.toLowerCase() !== clip(r.title, 400).toLowerCase() ? s : '';
+    };
+    if (recs.length > 1) return `${hi} ${recs.length} things need you. First: ${clip(recs[0].title, 100)}. ${why(recs[0])} I'll go through the rest, or stop me any time.`;
+    if (recs.length === 1) return `${hi} ${FIRST[recs[0].kind] || 'Something needs you'}: ${clip(recs[0].title, 100)}. ${why(recs[0])} ${lead(recs[0])} I can go through the rest, or call you back later. What would you like?`.replace(/\s+/g, ' ');
     const n = waitingItems().length;
     return `${hi} ${n ? `Here is a quick summary of the ${n} thing${n > 1 ? 's' : ''} waiting.` : 'Nothing urgent is waiting, but you asked for a summary.'}`;
   }
@@ -612,6 +651,21 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
           seen.add(id);
           // typed by hand, so it is never old news: it takes the normal path, as a live event
           await ingest([{ id, source: 'custom', kind: 'custom', title: clip(text, 140), detail: text, ts: iso(now()), sample: true }], true);
+          return { ok: true, id };
+        }
+        case 'agent': {
+          // A coding agent (Claude Code, Codex) reporting in: it is blocked, needs a decision, hit an error or finished.
+          // It is a live event like any other, so Jev decides whether it is worth a call or can wait for a briefing.
+          const who = { claude: 'Claude Code', codex: 'Codex' }[String(a.agent || '').toLowerCase()] || 'A coding agent';
+          const needs = ['input', 'permission', 'error', 'done'].includes(a.needs) ? a.needs : 'input';
+          const text = clip(String(a.text == null ? '' : a.text).replace(/\s+/g, ' ').trim(), 300);
+          if (text.length < 3) return { ok: false, error: 'say what the agent needs, in at least 3 characters' };
+          const project = clip(String(a.project == null ? '' : a.project).replace(/\s+/g, ' ').trim(), 60);
+          const verb = { input: 'needs your input', permission: 'needs your permission', error: 'hit an error', done: 'finished' }[needs];
+          let id;
+          do { id = 'agent:' + newId('a'); } while (seen.has(id));
+          seen.add(id);
+          await ingest([{ id, source: 'agent', kind: 'agent_request', needs, title: clip(`${who}${project ? ' in ' + project : ''} ${verb}: ${text}`, 140), detail: text, ts: iso(now()) }], true);
           return { ok: true, id };
         }
         case 'add_watch': {

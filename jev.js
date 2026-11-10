@@ -127,6 +127,15 @@ function rules(event) {
     if (MAIN_BRANCH.test(text)) return make('call', 0.8, 'The build on the main branch is failing; others are likely blocked.');
     return make('brief', 0.5, 'A build failed on a side branch; worth a look in the next briefing.');
   }
+  if (event.kind === 'agent_request') {
+    if (event.needs === 'done') return make('brief', 0.3, 'A coding agent finished; worth a look in the next briefing.');
+    return make('call', 0.75, 'A coding agent is blocked and waiting on you.');
+  }
+  if (event.kind === 'market_move') {
+    const pct = Number((/(\d+(?:\.\d+)?)%/.exec(text) || [])[1]);
+    if (pct >= 5) return make('call', 0.8, 'A big price move of about ' + pct + '%; worth knowing right away.');
+    return make('brief', 0.5, 'A notable price move; worth a look in the next briefing.');
+  }
   if (TRIVIAL.test(text)) return make('ignore', 0.1, 'Looks like a typo, docs or routine dependency change; can wait.');
   if (event.kind === 'review_request') return make('brief', 0.45, 'Someone asked for your review; worth a look in the next briefing.');
   if (event.kind === 'mention') return make('brief', 0.4, 'You were mentioned; worth a look in the next briefing.');

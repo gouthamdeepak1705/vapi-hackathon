@@ -83,6 +83,7 @@ function outboundPrompt(reason, briefing, now) {
 function inboundPrompt(briefing, now) {
   const head =
     `You are the user's chief of staff. They have phoned in to their desk to hear what is waiting. ${RULES} ` +
+    `Talk like a person on the phone, warm and relaxed, not like a report. Your opening line already gave a quick rundown, so now let them steer: go deeper on whatever they pick, and keep each answer to a couple of sentences. ` +
     `You cannot schedule callbacks or take orders on this line; if they ask, say they can ask on your next call or use the board. ` +
     `When they are done, say a short goodbye ending with the word "goodbye", and the call will end.\n\n` +
     `Briefing as of ${localStamp(now)}:\n`;
@@ -194,7 +195,7 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
   const lastKnown = new Map(); // call id -> last status we reported
   let webSeq = 0;
   const web = new Map();       // web-<n> -> { assistant, startedAt, vapiCallId, declined }: calls that ring in the browser page
-  const inbound = { assistantId: '', attachedTo: '', briefing: null, chain: Promise.resolve() };
+  const inbound = { assistantId: '', attachedTo: '', briefing: null, opening: null, chain: Promise.resolve() };
 
   async function api(method, path, body) {
     const c = cfg();
@@ -228,7 +229,7 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
 
   // The assistant for an outbound call: the same object whether Vapi dials the phone or the page starts a web call.
   function outboundAssistant({ reason, briefing, firstMessage }) {
-    const opening = str(firstMessage, 300) || `Hi, it's your desk. ${str(reason, 200) || 'Something needs your attention'}. Do you have a minute?`;
+    const opening = str(firstMessage, 700) || `Hi, it's your desk. ${str(reason, 200) || 'Something needs your attention'}. Do you have a minute?`;
     return {
       firstMessage: opening,
       model: modelOf(outboundPrompt(reason, briefing, now())),
@@ -363,20 +364,22 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
   }
 
   // One request at a time, so two quick syncs cannot both create the assistant.
-  function syncInbound(briefing) {
-    const run = inbound.chain.then(() => doSync(briefing), () => doSync(briefing));
+  function syncInbound(briefing, opening) {
+    const run = inbound.chain.then(() => doSync(briefing, opening), () => doSync(briefing, opening));
     inbound.chain = run.catch(() => {});
     return run;
   }
 
-  async function doSync(briefing) {
+  async function doSync(briefing, openingLine) {
     try {
       const c = cfg();
       if (!c.vapiKey) return { ok: false, error: 'no key' };
       if (!c.vapiPhoneNumberId) return { ok: false, error: 'vapiPhoneNumberId is not set' };
       const text = String(briefing || '');
-      if (text === inbound.briefing && inbound.attachedTo === c.vapiPhoneNumberId) return { ok: true };
-      const opening = text.trim() ? "Hi, it's your desk. Here's what's waiting." : "Hi, it's your desk. Nothing needs you right now.";
+      const given = str(openingLine, 700);
+      if (text === inbound.briefing && given === inbound.opening && inbound.attachedTo === c.vapiPhoneNumberId) return { ok: true };
+      // The opening should say the rundown itself: the assistant only speaks again once the caller answers.
+      const opening = given || (text.trim() ? "Hi, it's your desk. Here's what's waiting." : "Hi, it's your desk. Nothing needs you right now.");
       const fields = { firstMessage: opening, model: modelOf(inboundPrompt(text, now())), voice: VOICE };
 
       if (!inbound.assistantId) {
@@ -402,7 +405,7 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
         if (!p.ok) return { ok: false, error: p.error };
         inbound.attachedTo = c.vapiPhoneNumberId;
       }
-      inbound.briefing = text;
+      inbound.briefing = text; inbound.opening = given;
       return { ok: true };
     } catch (e) { return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
   }

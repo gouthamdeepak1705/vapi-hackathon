@@ -1,5 +1,5 @@
 // Settings for the chief of staff. Keys live outside the repo (which is public) in
-// %APPDATA%\desk-board\cos.json and are re-read on every call, so edits apply without a restart.
+// ~/Library/Application Support/desk-board/cos.json on a Mac (%APPDATA%\desk-board\cos.json on Windows) and are re-read on every call, so edits apply without a restart.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -21,6 +21,8 @@ const DEFAULTS = {
   watches: [],          // topics to watch on the web through Exa, like "OpenAI API pricing changes" (at most 5)
   watchMinutes: 5,      // how often each topic is searched
   dailyBriefing: '',    // like "09:00": a briefing call every day at that local time
+  tickers: ['SPY', 'NVDA'], // prices watched for big moves (at most 5)
+  moveAlertPct: 2,      // a day move of at least this many percent becomes an event
   vapiPublicKey: '',    // Vapi public key (safe in a browser): lets the page start a web call when callMode is 'browser'
   callMode: 'phone',    // 'phone' rings your phone; 'browser' rings the board page and talks through its microphone
   profile: '',   // a few lines about the user, used by the standalone runner (the board uses its memory instead)

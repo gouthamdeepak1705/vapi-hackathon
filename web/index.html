@@ -151,6 +151,28 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
 .daily { margin-top: 8px; color: var(--muted); font-size: 15px; }
 .daily input { color-scheme: dark; }
 .fb { font-size: 14px; } .fb.on { color: var(--green); text-decoration: underline; } .fb.bad.on { color: var(--red); }
+
+/* overview: what it is, how it works, what it watches */
+.about { background: var(--canvas); border-bottom: 1px solid var(--border); padding: 4px 32px 8px; }
+.about > summary { cursor: pointer; list-style: none; padding: 14px 0; font-size: 14px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.about > summary::-webkit-details-marker { display: none; }
+.about > summary::before { content: "\25BE"; margin-right: 10px; } .about:not([open]) > summary::before { content: "\25B8"; }
+.about-lede { max-width: 1000px; margin: 0 0 18px; font-size: 17px; }
+.about-lede b { color: var(--green); font-weight: 600; }
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; margin-bottom: 22px; }
+.step { flex: 1 1 250px; border: 1px solid var(--border); background: var(--subtle); padding: 12px 16px; }
+.step b { display: block; margin-bottom: 2px; } .step .n { color: var(--green); margin-right: 8px; }
+.step p { margin: 0; color: var(--muted); font-size: 15px; }
+.arrow { align-self: center; color: var(--muted); }
+.about h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.tile { border: 1px solid var(--border); background: var(--subtle); padding: 12px 14px; }
+.tile .th { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.tile .st { margin-left: auto; font-weight: 400; font-size: 13px; color: var(--muted); text-align: right; overflow-wrap: anywhere; }
+.tile p { margin: 6px 0 4px; font-size: 15px; }
+.tile .meta { font-size: 13px; }
+.jev2 { max-width: 1000px; margin: 0 0 20px; color: var(--muted); font-size: 15px; } .jev2 b { color: var(--fg); font-weight: 600; }
+@media (max-width: 960px) { .about { padding: 4px 16px 8px; } .arrow { display: none; } }
 </style>
 </head>
 <body>
@@ -159,6 +181,20 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
   <div class="tagline">watches everything, phones you only when it matters</div>
   <div class="dots" id="dots"></div>
 </header>
+
+<details class="about" id="about" open>
+  <summary>how it works</summary>
+  <p class="about-lede"><b>An AI chief of staff.</b> It watches the things you care about, has <b>Jev</b> judge every event, and phones you only when something is worth interrupting you for. Everything else waits in the feed below and in your briefing.</p>
+  <div class="flow">
+    <div class="step"><b><span class="n">1</span>Watch</b><p>Repos, stock prices, news, Trump announcements and your coding agents send events in.</p></div>
+    <div class="arrow">&rarr;</div>
+    <div class="step"><b><span class="n">2</span>Jev judges it</b><p>Two jobs: how important is it (0 to 1), and is it worth a call right now.</p></div>
+    <div class="arrow">&rarr;</div>
+    <div class="step"><b><span class="n">3</span>You hear about it</b><p>Above your line it rings and talks it through. Below it, it waits for your briefing.</p></div>
+  </div>
+  <h3>what it watches</h3>
+  <div class="tiles" id="tiles"></div>
+</details>
 
 <div class="cols">
   <main>
@@ -250,7 +286,7 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
   function btn(label, cls, fn) { var b = el('button', cls, label); b.type = 'button'; b.onclick = fn; return b; }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
 
-  var SERVICES = [['github', 'github'], ['cards', 'plaid'], ['jev', 'jev'], ['exa', 'exa'], ['phone', 'vapi']];
+  var SERVICES = [['github', 'github'], ['prices', 'quotes'], ['news', 'watch'], ['cards', 'plaid'], ['jev', 'jev'], ['exa', 'exa'], ['phone', 'vapi']];
   var DECISION = { call: 'call', brief: 'can wait', ignore: 'ignored' };
   function healthClass(h) {
     return String(h).indexOf('ok') === 0 ? 'ok' : (h === 'sample' || h === 'mock') ? 'warn' : String(h).indexOf('error') === 0 ? 'err' : 'off';
@@ -719,9 +755,39 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
     $('quiet').textContent = !qh ? '' : 'Quiet hours ' + (q ? q[1] + ' to ' + q[2] : qh) + ': only urgency 0.90 and up rings.';
   }
 
+  // The overview tiles: what is being watched, in plain words, with a live status for each.
+  function statusWord(v) {
+    v = String(v);
+    return v.indexOf('ok') === 0 ? 'live' : v === 'sample' ? 'sample data' : v.indexOf('error') === 0 ? v.replace(/^error:?\s*/, '') : v === 'off' ? 'off' : v;
+  }
+  function drawAbout() {
+    var st = (S && S.state) || {}, h = st.health || {}, set = st.settings || {};
+    var k = JSON.stringify([h, set.watches, set.tickers, set.moveAlertPct, set.repos, set.watchMinutes, set.dailyBriefing, set.callMode, set.threshold]);
+    if (k === keys.about) return;
+    keys.about = k;
+    var watches = arr(set.watches), tickers = arr(set.tickers), repos = arr(set.repos);
+    var tiles = [
+      ['GitHub', h.github, 'Failed builds, new issues, security alerts and notifications.', repos.length ? repos.join(', ') : 'no repos set'],
+      ['Stock prices', h.quotes, 'A day move of ' + (set.moveAlertPct || 2) + '% or more in these tickers.', tickers.length ? tickers.join(', ') : 'no tickers set'],
+      ['News and Trump', h.watch, 'New web results on your topics, including Trump announcements that could move markets.', watches.length ? watches.length + ' topic' + (watches.length > 1 ? 's' : '') + ', checked every ' + (set.watchMinutes || 5) + ' min' : 'no topics yet, add one on the right'],
+      ['Coding agents', 'ok', 'Claude Code and Codex tell it when they are blocked and need you.', 'send with scripts/notify-agent.js'],
+      ['Card charges', h.plaid, 'Charges worth a second look. Sample data for now.', 'Plaid sandbox'],
+      ['Briefing call', set.dailyBriefing ? 'ok' : 'off', 'Everything that waited, read out at a time you choose.', set.dailyBriefing ? 'every day at ' + set.dailyBriefing : 'not set, pick a time on the right'],
+      ['Where it rings', h.vapi, 'The voice agent that talks to you, through Vapi.', (set.callMode === 'browser' ? 'this browser' : 'your phone') + ', when urgency is above ' + (typeof set.threshold === 'number' ? set.threshold.toFixed(2) : '0.70')]
+    ];
+    $('tiles').replaceChildren.apply($('tiles'), tiles.map(function (t) {
+      var d = el('div', 'tile'), head = el('div', 'th');
+      head.appendChild(el('i', 'dot ' + healthClass(t[1] == null ? 'off' : t[1])));
+      head.appendChild(document.createTextNode(t[0]));
+      head.appendChild(el('span', 'st', statusWord(t[1] == null ? 'off' : t[1])));
+      d.appendChild(head); d.appendChild(el('p', null, t[2])); d.appendChild(el('div', 'meta', t[3]));
+      return d;
+    }));
+  }
+
   function draw() {
     if (!S) return;
-    drawHealth(); drawSide();
+    drawHealth(); drawAbout(); drawSide();
     var st = S.state || {};
     var events = arr(st.events).filter(function (e) { return e && e.status !== 'dismissed'; });
     var calls = arr(st.calls).slice().sort(function (a, b) { return Date.parse(b.at) - Date.parse(a.at); }).slice(0, 12);
