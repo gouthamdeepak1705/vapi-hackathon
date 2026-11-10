@@ -325,6 +325,144 @@ async function t(name, fn) {
     assert.deepStrictEqual(await v.syncInbound('b'), { ok: true });
   });
 
+  // ---- browser calls: the call rings in the page and the page starts a web call ----
+  const web = { ...settings, callMode: 'browser', vapiPublicKey: 'pub-key' };
+  const webCfg = () => ({ ...web });
+  const VID = '11111111-2222-4333-8444-555555555555';
+  const payload = { reason: 'build failed', briefing: 'BRIEFING-TEXT main is red', firstMessage: 'Hi there' };
+
+  await t('browser mode: no request, a web- id, and offer gives the same assistant the phone path sends', async () => {
+    const f = stub(() => ({ status: 201, json: { id: 'call-1' } }));
+    const v = createVapi({ cfg: webCfg, log: quiet, fetch: f, now });
+    const r = await v.call(payload);
+    assert.ok(r.ok && r.web === true && /^web-\d+$/.test(r.callId), JSON.stringify(r));
+    assert.strictEqual(f.calls.length, 0, 'nothing is sent to Vapi when the call is placed');
+    const o = v.offer(r.callId);
+    assert.ok(o && o.assistant);
+    const phoneF = stub(() => ({ status: 201, json: { id: 'call-1' } }));
+    await createVapi({ cfg, log: quiet, fetch: phoneF, now }).call(payload);
+    assert.deepStrictEqual(o.assistant, phoneF.calls[0].body.assistant);
+    assert.ok(!JSON.stringify(o).includes('fake-key') && !JSON.stringify(o).includes('pub-key'), 'no key inside the assistant');
+    const r2 = await v.call(payload);
+    assert.notStrictEqual(r2.callId, r.callId, 'each call gets its own id');
+    assert.strictEqual(v.offer('web-999'), null);
+    assert.strictEqual(v.offer(undefined), null);
+    assert.strictEqual(f.calls.length, 0);
+  });
+
+  await t('browser mode: ringing, then failed after 45 seconds unanswered', async () => {
+    const f = stub(() => ({ status: 200, json: {} }));
+    const v = createVapi({ cfg: webCfg, log: quiet, fetch: f, now });
+    const { callId } = await v.call(payload);
+    assert.deepStrictEqual(await v.result(callId), { status: 'ringing' });
+    clock += 44000;
+    assert.deepStrictEqual(await v.result(callId), { status: 'ringing' });
+    assert.ok(v.offer(callId), 'still answerable at 44 s');
+    clock += 2000;
+    assert.deepStrictEqual(await v.result(callId), { status: 'failed', endedReason: 'not answered in the browser' });
+    assert.strictEqual(v.offer(callId), null, 'too late to answer');
+    assert.strictEqual(f.calls.length, 0, 'ringing and missing a call never touch Vapi');
+  });
+
+  await t('browser mode: declined', async () => {
+    const f = stub(() => ({ status: 200, json: {} }));
+    const v = createVapi({ cfg: webCfg, log: quiet, fetch: f, now });
+    const { callId } = await v.call(payload);
+    assert.strictEqual(v.decline(callId), true);
+    assert.deepStrictEqual(await v.result(callId), { status: 'failed', endedReason: 'declined in the browser' });
+    assert.strictEqual(v.offer(callId), null);
+    assert.strictEqual(v.attach(callId, VID), false, 'a declined call cannot be answered');
+    assert.strictEqual(v.decline('web-999'), false);
+    assert.strictEqual(f.calls.length, 0);
+  });
+
+  await t('browser mode: after attach the result is the ordinary call record', async () => {
+    const endedAt = new Date(clock).toISOString();
+    let rec = { id: VID, status: 'queued' };
+    const f = stub(() => ({ status: 200, json: rec }));
+    const v = createVapi({ cfg: webCfg, log: quiet, fetch: f, now });
+    const { callId } = await v.call(payload);
+    assert.strictEqual(f.calls.length, 0);
+    assert.strictEqual(v.attach(callId, VID), true);
+    assert.strictEqual(v.offer(callId), null, 'answered once');
+    assert.strictEqual(v.decline(callId), false, 'cannot decline an answered call');
+    assert.strictEqual(v.attach(callId, VID), false, 'cannot attach twice');
+    assert.strictEqual((await v.result(callId)).status, 'queued');
+    assert.strictEqual(f.calls.length, 1);
+    assert.strictEqual(f.calls[0].method, 'GET');
+    assert.strictEqual(f.calls[0].url, 'https://api.vapi.ai/call/' + VID);
+    assert.strictEqual(f.calls[0].headers.Authorization, 'Bearer fake-key', 'read with the private key');
+    clock += 60000;   // far past the 45 s ring window: an answered call does not time out
+    rec = { id: VID, status: 'in-progress' };
+    assert.strictEqual((await v.result(callId)).status, 'in-progress');
+    rec = { id: VID, status: 'ended', endedReason: 'customer-ended-call', endedAt, artifact: { transcript: 'AI: Hi\nUser: call me back in two minutes' },
+      analysis: { summary: 'Told about the build.', structuredData: { acknowledged: true, callbackRequested: true, callbackInMinutes: 2, callbackTopic: 'the build' } } };
+    const r = await v.result(callId);
+    assert.strictEqual(r.status, 'ended');
+    assert.strictEqual(r.summary, 'Told about the build.');
+    assert.strictEqual(Date.parse(r.outcome.callbackAt), Date.parse(endedAt) + 120000);
+    assert.strictEqual(r.outcome.callbackTopic, 'the build');
+    assert.ok(f.calls.every((c) => c.method === 'GET' && c.url === 'https://api.vapi.ai/call/' + VID), 'only ever reads the real call');
+    // a web call that never connected is a failure, like a phone call nobody answered
+    const f2 = stub(() => ({ status: 200, json: { id: VID, status: 'ended', endedReason: 'call.start.error-get-transport' } }));
+    const v2 = createVapi({ cfg: webCfg, log: quiet, fetch: f2, now });
+    const c2 = await v2.call(payload);
+    v2.attach(c2.callId, VID);
+    assert.deepStrictEqual(await v2.result(c2.callId), { status: 'failed', endedReason: 'call.start.error-get-transport' });
+  });
+
+  await t('browser mode: bad call ids are rejected and leave the call ringing', async () => {
+    const f = stub(() => ({ status: 200, json: {} }));
+    const v = createVapi({ cfg: webCfg, log: quiet, fetch: f, now });
+    const { callId } = await v.call(payload);
+    for (const bad of ['', 'abc', 'call-1', VID + 'x', ' ' + VID, VID.replace(/-/g, ''), '../call', 'zzzzzzzz-2222-4333-8444-555555555555', 42, null, undefined, {}]) {
+      assert.strictEqual(v.attach(callId, bad), false, 'rejected: ' + JSON.stringify(bad));
+    }
+    assert.strictEqual(v.attach('web-999', VID), false, 'unknown call');
+    assert.strictEqual(v.attach('mock-1', VID), false);
+    assert.deepStrictEqual(await v.result(callId), { status: 'ringing' });
+    assert.strictEqual(f.calls.length, 0);
+    assert.strictEqual((await v.result('web-999')).status, 'failed', 'an unknown browser call (app restarted) fails');
+    assert.strictEqual(v.attach(callId, VID.toUpperCase()), true, 'uppercase hex is still a UUID');
+  });
+
+  await t('browser mode: health, and a missing public key is named', async () => {
+    const f = stub(() => ({ status: 200, json: {} }));
+    assert.strictEqual(createVapi({ cfg: webCfg, log: quiet, fetch: f, now }).health(), 'ok (browser calls)');
+    const noPub = () => ({ ...web, vapiPublicKey: '' });
+    const v = createVapi({ cfg: noPub, log: quiet, fetch: f, now });
+    assert.ok(/^error: .*vapiPublicKey/.test(v.health()), v.health());
+    const r = await v.call(payload);
+    assert.ok(!r.ok && /vapiPublicKey/.test(r.error), JSON.stringify(r));
+    assert.strictEqual(v.offer('web-1'), null);
+    // browser mode needs neither a phone number nor a Vapi number
+    const bare = () => ({ ...web, vapiPhoneNumberId: '', myPhone: '' });
+    const vb = createVapi({ cfg: bare, log: quiet, fetch: f, now });
+    assert.strictEqual(vb.health(), 'ok (browser calls)');
+    assert.ok((await vb.call(payload)).ok);
+    // without the private key there is nothing to read the call with: still the mock
+    assert.strictEqual(createVapi({ cfg: () => ({ ...web, vapiKey: '' }), log: quiet, fetch: f, now }).health(), 'mock');
+    assert.strictEqual(f.calls.length, 0);
+  });
+
+  await t('phone and mock modes are unchanged by the new settings', async () => {
+    const f = stub(() => ({ status: 201, json: { id: 'call-9', status: 'queued' } }));
+    for (const extra of [{}, { callMode: 'phone', vapiPublicKey: 'pub-key' }, { callMode: 'nonsense', vapiPublicKey: 'pub-key' }]) {
+      f.calls.length = 0;
+      const v = createVapi({ cfg: () => ({ ...settings, ...extra }), log: quiet, fetch: f, now });
+      assert.strictEqual(v.health(), 'ok');
+      assert.deepStrictEqual(await v.call(payload), { ok: true, callId: 'call-9' });
+      assert.strictEqual(f.calls.length, 1);
+      assert.strictEqual(f.calls[0].url, 'https://api.vapi.ai/call');
+      assert.strictEqual(f.calls[0].body.phoneNumberId, 'pn-1');
+      assert.strictEqual(v.offer('call-9'), null);
+    }
+    const m = createVapi({ cfg: () => ({ ...noKey(), callMode: 'browser', vapiPublicKey: 'pub-key' }), log: quiet, fetch: f, now });
+    const mc = await m.call(payload);
+    assert.ok(mc.ok && mc.mock && /^mock-/.test(mc.callId) && !mc.web);
+    assert.strictEqual(m.health(), 'mock');
+  });
+
   // ---- live ----
   if (LIVE) {
     const live = createVapi({ cfg: realCfg, log: (m) => console.log('  log:', m) });

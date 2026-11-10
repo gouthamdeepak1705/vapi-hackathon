@@ -44,6 +44,7 @@ Windows). Edits apply without a restart. The file lives outside this repo on pur
 |---|---|
 | `vapiKey`, `vapiPhoneNumberId` | Vapi private key and the id of a number that can place outbound calls |
 | `myPhone` | The number to ring, like `+14155550123` |
+| `callMode`, `vapiPublicKey` | `phone` rings your phone. `browser` rings the page instead and you talk through the laptop; it needs the Vapi public key and no phone number |
 | `jevKey` | TypeSafe Jev key (set `jevBase` to `https://openrouter.ai/api/v1` for an OpenRouter key) |
 | `exaKey` | Exa key |
 | `plaidClientId`, `plaidSecret` | Optional. Plaid sandbox keys; without them the card feed is sample data |

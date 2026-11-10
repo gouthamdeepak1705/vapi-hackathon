@@ -9,6 +9,9 @@ const PROMPT_MAX = 6000;
 const INBOUND_NAME = 'Desk Board chief (dial-in)';
 const MOCK_RING_MS = 1000;
 const MOCK_END_MS = 4000;
+const WEB_RING_MS = 45000;        // a browser call nobody answers in this long is a missed call
+const WEB_KEEP_MS = 3600000;      // browser call records older than this are forgotten
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, a: 1, an: 1 };
 
@@ -189,6 +192,8 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
   const mocks = new Map();     // mock call id -> { start, reason, callback, order }
   const endedSeen = new Map(); // call id -> ms we first saw 'ended' (to wait for the analysis)
   const lastKnown = new Map(); // call id -> last status we reported
+  let webSeq = 0;
+  const web = new Map();       // web-<n> -> { assistant, startedAt, vapiCallId, declined }: calls that ring in the browser page
   const inbound = { assistantId: '', attachedTo: '', briefing: null, chain: Promise.resolve() };
 
   async function api(method, path, body) {
@@ -221,6 +226,23 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
   const TRANSCRIBER = { provider: 'deepgram', model: 'nova-3', language: 'en' };
   const VOICE = { provider: 'vapi', voiceId: 'Elliot' };   // named so a call never depends on the account's default voice
 
+  // The assistant for an outbound call: the same object whether Vapi dials the phone or the page starts a web call.
+  function outboundAssistant({ reason, briefing, firstMessage }) {
+    const opening = str(firstMessage, 300) || `Hi, it's your desk. ${str(reason, 200) || 'Something needs your attention'}. Do you have a minute?`;
+    return {
+      firstMessage: opening,
+      model: modelOf(outboundPrompt(reason, briefing, now())),
+      transcriber: TRANSCRIBER,
+      voice: VOICE,
+      maxDurationSeconds: MAX_CALL_SECONDS,
+      endCallPhrases: ['goodbye'],
+      analysisPlan: {
+        summaryPlan: { enabled: true },
+        structuredDataPlan: { enabled: true, schema: SCHEMA, timeoutSeconds: 10 },
+      },
+    };
+  }
+
   async function call({ reason, briefing, firstMessage, to } = {}) {
     try {
       const c = cfg();
@@ -229,25 +251,21 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
         mocks.set(id, { start: now(), reason: String(reason || 'something came up'), callback: /\[mock:callback\]/.test(`${reason} ${briefing}`), order: /\[mock:order\]/.test(`${reason} ${briefing}`) });
         return { ok: true, callId: id, mock: true };
       }
+      if (c.callMode === 'browser') {
+        // No phone call: the page rings and starts a web call with this same assistant (see offer, attach)
+        if (!c.vapiPublicKey) return { ok: false, error: 'vapiPublicKey is not set in the settings file (the browser needs it to start the call)' };
+        const id = 'web-' + (++webSeq);
+        for (const [k, w] of web) if (now() - w.startedAt > WEB_KEEP_MS) web.delete(k);
+        web.set(id, { assistant: outboundAssistant({ reason, briefing, firstMessage }), startedAt: now(), vapiCallId: null, declined: false });
+        return { ok: true, callId: id, web: true };
+      }
       if (!c.vapiPhoneNumberId) return { ok: false, error: 'vapiPhoneNumberId is not set in the settings file (the Vapi number that places the call)' };
       const number = normalizePhone(to || c.myPhone);
       if (!number) return { ok: false, error: (to || c.myPhone) ? 'the phone number to call is not valid; use + and the country code, like +14155550123' : 'myPhone is not set in the settings file (the number to call)' };
-      const opening = str(firstMessage, 300) || `Hi, it's your desk. ${str(reason, 200) || 'Something needs your attention'}. Do you have a minute?`;
       const r = await api('POST', '/call', {
         phoneNumberId: c.vapiPhoneNumberId,
         customer: { number },
-        assistant: {
-          firstMessage: opening,
-          model: modelOf(outboundPrompt(reason, briefing, now())),
-          transcriber: TRANSCRIBER,
-          voice: VOICE,
-          maxDurationSeconds: MAX_CALL_SECONDS,
-          endCallPhrases: ['goodbye'],
-          analysisPlan: {
-            summaryPlan: { enabled: true },
-            structuredDataPlan: { enabled: true, schema: SCHEMA, timeoutSeconds: 10 },
-          },
-        },
+        assistant: outboundAssistant({ reason, briefing, firstMessage }),
       });
       if (!r.ok) return { ok: false, error: r.error };
       const id = r.data && r.data.id;
@@ -276,38 +294,72 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
     const id = String(callId || '');
     try {
       if (id.startsWith('mock-')) return mockResult(id);
-      const r = await api('GET', '/call/' + encodeURIComponent(id));
-      if (!r.ok) {
-        if (r.status === 404) return { status: 'failed', endedReason: r.error };
-        return { status: lastKnown.get(id) || 'queued' };   // network trouble: keep the last answer
-      }
-      const c = r.data || {};
-      const transcript = (c.artifact && c.artifact.transcript) || '';
-      const reason = c.endedReason || '';
-      let status;
-      if (c.status === 'ended') {
-        const noOneThere = NEVER_CONNECTED.test(reason) || (MAYBE_FAILED.test(reason) && !userLines(transcript).length);
-        if (noOneThere) status = 'failed';
-        else {
-          const first = endedSeen.get(id) ?? (endedSeen.set(id, now()), now());
-          const a = c.analysis || {};
-          const have = a.summary || (a.structuredData && Object.keys(a.structuredData).length);
-          if (!have && now() - first < ANALYSIS_WAIT_MS) status = 'in-progress';   // analysis is still being written
-          else status = 'ended';
+      if (id.startsWith('web-')) {
+        const w = web.get(id);
+        if (!w) return { status: 'failed', endedReason: 'browser call unknown (the app was restarted)' };
+        if (!w.vapiCallId) {
+          if (w.declined) return { status: 'failed', endedReason: 'declined in the browser' };
+          if (now() - w.startedAt >= WEB_RING_MS) return { status: 'failed', endedReason: 'not answered in the browser' };
+          return { status: 'ringing' };
         }
-      } else if (c.status === 'scheduled' || c.status === 'queued') status = 'queued';
-      else if (c.status === 'ringing') status = 'ringing';
-      else status = 'in-progress';   // in-progress, forwarding, or anything new
-      lastKnown.set(id, status);
-      if (status === 'failed') return { status, endedReason: reason };
-      if (status !== 'ended') return { status };
-      const endedAt = Date.parse(c.endedAt) || endedSeen.get(id) || now();
-      const a = c.analysis || {};
-      return {
-        status, endedReason: reason, summary: a.summary || '', transcript,
-        outcome: outcomeFrom(a.structuredData, transcript, endedAt),
-      };
+        return await readCall(w.vapiCallId);   // answered: it is an ordinary call record from here on
+      }
+      return await readCall(id);
     } catch (e) { return { status: lastKnown.get(id) || 'queued' }; }
+  }
+
+  // Browser calls: the page fetches the assistant, starts the web call itself, then reports the real call id.
+  const pending = (id) => { const w = web.get(String(id || '')); return w && !w.vapiCallId && !w.declined ? w : null; };
+  function offer(callId) {
+    const w = pending(callId);
+    return w && now() - w.startedAt < WEB_RING_MS ? { assistant: w.assistant } : null;
+  }
+  function attach(callId, vapiCallId) {
+    const w = pending(callId);
+    if (!w || typeof vapiCallId !== 'string' || !UUID.test(vapiCallId)) return false;
+    w.vapiCallId = vapiCallId;
+    return true;
+  }
+  function decline(callId) {
+    const w = pending(callId);
+    if (!w) return false;
+    w.declined = true;
+    return true;
+  }
+
+  // GET /call/{id} -> the status, and once ended the summary and outcome
+  async function readCall(id) {
+    const r = await api('GET', '/call/' + encodeURIComponent(id));
+    if (!r.ok) {
+      if (r.status === 404) return { status: 'failed', endedReason: r.error };
+      return { status: lastKnown.get(id) || 'queued' };   // network trouble: keep the last answer
+    }
+    const c = r.data || {};
+    const transcript = (c.artifact && c.artifact.transcript) || '';
+    const reason = c.endedReason || '';
+    let status;
+    if (c.status === 'ended') {
+      const noOneThere = NEVER_CONNECTED.test(reason) || (MAYBE_FAILED.test(reason) && !userLines(transcript).length);
+      if (noOneThere) status = 'failed';
+      else {
+        const first = endedSeen.get(id) ?? (endedSeen.set(id, now()), now());
+        const a = c.analysis || {};
+        const have = a.summary || (a.structuredData && Object.keys(a.structuredData).length);
+        if (!have && now() - first < ANALYSIS_WAIT_MS) status = 'in-progress';   // analysis is still being written
+        else status = 'ended';
+      }
+    } else if (c.status === 'scheduled' || c.status === 'queued') status = 'queued';
+    else if (c.status === 'ringing') status = 'ringing';
+    else status = 'in-progress';   // in-progress, forwarding, or anything new
+    lastKnown.set(id, status);
+    if (status === 'failed') return { status, endedReason: reason };
+    if (status !== 'ended') return { status };
+    const endedAt = Date.parse(c.endedAt) || endedSeen.get(id) || now();
+    const a = c.analysis || {};
+    return {
+      status, endedReason: reason, summary: a.summary || '', transcript,
+      outcome: outcomeFrom(a.structuredData, transcript, endedAt),
+    };
   }
 
   // One request at a time, so two quick syncs cannot both create the assistant.
@@ -358,12 +410,13 @@ module.exports = function createVapi({ cfg, log, fetch: fetchImpl, now: nowFn })
   function health() {
     const c = cfg();
     if (!c.vapiKey) return 'mock';
+    if (c.callMode === 'browser') return c.vapiPublicKey ? (lastError ? 'error: ' + lastError : 'ok (browser calls)') : 'error: vapiPublicKey is not set in the settings file';
     if (!c.vapiPhoneNumberId) return 'error: no phone number id';
     if (!c.myPhone) return 'error: no phone number set';
     return lastError ? 'error: ' + lastError : 'ok';
   }
 
-  return { call, result, syncInbound, health };
+  return { call, result, offer, attach, decline, syncInbound, health };
 };
 
 Object.assign(module.exports, { outcomeFrom, scanTranscript, normalizePhone, clockToMs, outboundPrompt, inboundPrompt, SCHEMA, INBOUND_NAME });

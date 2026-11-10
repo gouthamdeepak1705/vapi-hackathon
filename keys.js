@@ -21,6 +21,8 @@ const DEFAULTS = {
   watches: [],          // topics to watch on the web through Exa, like "OpenAI API pricing changes" (at most 5)
   watchMinutes: 5,      // how often each topic is searched
   dailyBriefing: '',    // like "09:00": a briefing call every day at that local time
+  vapiPublicKey: '',    // Vapi public key (safe in a browser): lets the page start a web call when callMode is 'browser'
+  callMode: 'phone',    // 'phone' rings your phone; 'browser' rings the board page and talks through its microphone
   profile: '',   // a few lines about the user, used by the standalone runner (the board uses its memory instead)
 };
 

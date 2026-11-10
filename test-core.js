@@ -628,6 +628,105 @@ async function main() {
   fs.rmSync(dir18, { recursive: true, force: true });
   vals.dailyBriefing = '';
 
+  // 19. Browser calls: the call rings on the page (state.ring), the page fetches the assistant and reports the real call id
+  assert.strictEqual(chief.state().ring, null, 'a phone or mock call never rings the page');
+  const SECRET = 'PRIVATE-KEY-SECRET', WEBID = '22222222-3333-4444-8555-666666666666';
+  const wc = [];   // the fake browser-call vapi's records
+  let wExpire = false;
+  const wFind = (id) => wc.find((x) => x.id === id);
+  const webVapi = {
+    health: () => 'ok (browser calls)',
+    call: async (p) => { const id = 'web-' + (wc.length + 1); wc.push({ id, ...p, polls: 0, vid: null, declined: false }); return { ok: true, callId: id, web: true }; },
+    offer: (id) => { const c = wFind(id); return c && !c.vid && !c.declined ? { assistant: { marker: 'assistant-of-' + id, firstMessage: c.firstMessage } } : null; },
+    attach: (id, vid) => { const c = wFind(id); if (!c || c.vid || typeof vid !== 'string' || !/^[0-9a-f-]{36}$/.test(vid)) return false; c.vid = vid; return true; },
+    decline: (id) => { const c = wFind(id); if (!c || c.vid) return false; c.declined = true; return true; },
+    result: async (id) => {
+      const c = wFind(id);
+      if (c.declined) return { status: 'failed', endedReason: 'declined in the browser' };
+      if (!c.vid) return wExpire ? { status: 'failed', endedReason: 'not answered in the browser' } : { status: 'ringing' };
+      c.polls++;
+      if (c.polls === 1) return { status: 'in-progress' };
+      return { status: 'ended', endedReason: 'customer-ended-call', summary: 'Talked it through in the browser.', outcome: { acknowledged: true, callbackAt: null, callbackTopic: null, noteToSelf: null, orders: [] } };
+    },
+    syncInbound: async () => ({ ok: true }),
+  };
+  const wdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-web-'));
+  Object.assign(vals, { vapiKey: SECRET, vapiPublicKey: 'pub-xyz', callMode: 'browser', myPhone: '', maxCallsPerHour: 99 });
+  const wb = createChief({ appDataDir: wdir, profile: () => '', addNote: () => {}, onState: () => {}, notify: () => {}, log: () => {}, mods: { cfg, sources: [], jev, exa, vapi: webVapi, orders: ordersFake }, timing });
+  wb.start();
+  const wIdle = () => !wb.state().calls.some((c) => c.status === 'ringing' || c.status === 'in-progress');
+  assert.strictEqual(wb.state().ring, null, 'nothing ringing yet');
+  assert.deepStrictEqual([wb.state().settings.callMode, wb.state().settings.vapiPublicKey], ['browser', 'pub-xyz']);
+  assert.strictEqual(wb.state().health.vapi, 'ok (browser calls)', 'browser mode needs no phone number');
+  // answered
+  assert.ok((await wb.action({ type: 'custom', text: 'U95 browser call one' })).ok);
+  await waitFor(() => wb.state().ring, 'the ring');
+  const ring1 = wb.state().ring;
+  const call1 = wb.state().calls.find((c) => c.id === ring1.id);
+  assert.ok(call1 && call1.status === 'ringing', 'ring.id is the call state id');
+  assert.ok(ring1.topic.includes('U95 browser call one') && ring1.reason.includes('Very urgent'), JSON.stringify(ring1));
+  assert.deepStrictEqual(Object.keys(ring1).sort(), ['id', 'reason', 'topic']);
+  assert.strictEqual(wc.length, 1);
+  const wjson = JSON.stringify(wb.state());
+  assert.ok(!wjson.includes(SECRET), 'the private key is never in the state');
+  assert.ok(!/vapiKey/.test(wjson) && !/"vapiId"|"webStep"|"webReason"/.test(wjson), 'no private fields in the state');
+  assert.ok(wjson.includes('pub-xyz'), 'the public key is meant for the page');
+  const bad1 = await wb.action({ type: 'web_offer', id: 'call-nope' });
+  assert.ok(bad1.ok === false && bad1.error, 'offer for an unknown call');
+  const off = await wb.action({ type: 'web_offer', id: ring1.id });
+  assert.ok(off.ok && off.assistant && off.assistant.marker === 'assistant-of-web-1', JSON.stringify(off));
+  assert.ok(wb.state().ring && wb.state().ring.id === ring1.id, 'fetching the assistant does not answer the call');
+  const bad2 = await wb.action({ type: 'web_started', id: ring1.id, vapiCallId: 'not-an-id' });
+  assert.ok(bad2.ok === false && /does not look right/.test(bad2.error), JSON.stringify(bad2));
+  assert.ok(wb.state().ring, 'a bad id leaves it ringing');
+  assert.ok((await wb.action({ type: 'web_started', id: ring1.id, vapiCallId: WEBID })).ok);
+  assert.strictEqual(wb.state().ring, null, 'answered: the ring clears at once');
+  assert.strictEqual((await wb.action({ type: 'web_offer', id: ring1.id })).ok, false, 'cannot be fetched or answered twice');
+  assert.strictEqual((await wb.action({ type: 'web_started', id: ring1.id, vapiCallId: WEBID })).ok, false);
+  assert.strictEqual((await wb.action({ type: 'web_declined', id: ring1.id })).ok, false);
+  await waitFor(() => wb.state().calls.find((c) => c.id === ring1.id).status === 'done', 'the browser call to finish');
+  assert.strictEqual(wb.state().calls.find((c) => c.id === ring1.id).summary, 'Talked it through in the browser.');
+  assert.strictEqual(wc[0].vid, WEBID);
+  assert.strictEqual(wb.state().ring, null);
+  // declined: the ring clears at once and the call fails
+  assert.ok((await wb.action({ type: 'custom', text: 'U95 browser call two' })).ok);
+  await waitFor(() => wb.state().ring, 'the second ring');
+  const ring2 = wb.state().ring;
+  assert.notStrictEqual(ring2.id, ring1.id);
+  assert.ok((await wb.action({ type: 'web_declined', id: ring2.id })).ok);
+  assert.strictEqual(wb.state().ring, null, 'declined: the ring clears at once');
+  assert.strictEqual(wc[1].declined, true);
+  await waitFor(() => wb.state().calls.find((c) => c.id === ring2.id).status === 'failed', 'the declined call to fail');
+  assert.ok(/declined in the browser/.test(wb.state().calls.find((c) => c.id === ring2.id).summary));
+  assert.strictEqual(find(wb, 'U95 browser call two').status, 'briefed', 'a declined event is still waiting');
+  assert.strictEqual(wc.length, 2, 'a declined call is not retried');
+  // unanswered: the vapi says so and the ring goes away
+  wExpire = true;
+  assert.ok((await wb.action({ type: 'custom', text: 'U95 browser call three' })).ok);
+  await waitFor(() => wc.length === 3, 'the third call');
+  await waitFor(() => wb.state().calls.find((c) => c.topic.includes('browser call three')).status === 'failed', 'the unanswered call to fail');
+  assert.strictEqual(wb.state().ring, null);
+  assert.ok(/not answered in the browser/.test(wb.state().calls.find((c) => c.topic.includes('browser call three')).summary));
+  await waitFor(wIdle, 'quiet');
+  // call mode
+  assert.deepStrictEqual(await wb.action({ type: 'set_call_mode', value: 'phone' }), { ok: true, callMode: 'phone' });
+  assert.strictEqual(vals.callMode, 'phone', 'saved through cfg.save');
+  assert.strictEqual(wb.state().settings.callMode, 'phone');
+  for (const v of ['web', '', null, undefined, 5, 'BROWSER']) {
+    const r = await wb.action({ type: 'set_call_mode', value: v });
+    assert.ok(r.ok === false && r.error, 'rejected ' + String(v));
+  }
+  assert.strictEqual(vals.callMode, 'phone', 'a bad value saves nothing');
+  assert.deepStrictEqual(await wb.action({ type: 'set_call_mode', value: 'browser' }), { ok: true, callMode: 'browser' });
+  // phone mode with no phone number is still an error, browser mode is not
+  vals.callMode = 'phone';
+  assert.strictEqual(wb.state().health.vapi, 'error: no phone number set');
+  vals.callMode = 'browser';
+  assert.strictEqual(wb.state().health.vapi, 'ok (browser calls)');
+  wb.stop();
+  fs.rmSync(wdir, { recursive: true, force: true });
+  Object.assign(vals, { vapiKey: '', vapiPublicKey: '', callMode: 'phone', myPhone: '+15550100' });
+
   chief.stop();
   console.log(`core tests passed (${placed.length} calls, ${pushes.length} state pushes, ${orderRuns.length} orders run)`);
 }

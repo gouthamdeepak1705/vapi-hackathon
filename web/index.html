@@ -111,6 +111,28 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
 .omenu .btn { padding: 4px 12px; font-size: 15px; }
 .notice { color: var(--muted); font-size: 14px; margin-bottom: 16px; overflow-wrap: anywhere; }
 [hidden] { display: none !important; }
+/* browser calls: incoming-call overlay, in-call bar, call mode switch */
+.ring { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px 0; background: #010409e6; }
+.ring-box { width: 100%; padding: 44px 32px; border-top: 2px solid var(--blue); border-bottom: 2px solid var(--blue); background: #58a6ff1a; text-align: center; animation: pulse 1.6s ease-in-out infinite; }
+.ring-lab { color: var(--blue); font-size: 14px; letter-spacing: .12em; text-transform: uppercase; }
+.ring-title { margin: 8px 0 10px; font-size: 40px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.ring-title::before { content: "\25CF  "; color: var(--blue); }
+.ring-why { margin: 0 auto; max-width: 900px; color: var(--muted); font-size: 22px; overflow-wrap: anywhere; }
+.ring-btns { display: flex; justify-content: center; flex-wrap: wrap; gap: 24px; margin-top: 32px; }
+.ring-btns .btn { min-width: 220px; padding: 16px 32px; font-size: 26px; font-weight: 700; }
+.btn.answer { border: 2px solid var(--green); color: var(--green); background: #3fb9501a; } .btn.answer:hover { background: #3fb95040; border-color: var(--green); }
+.btn.decline { border: 2px solid var(--red); color: var(--red); background: #f851491a; } .btn.decline:hover { background: #f8514940; border-color: var(--red); }
+.ring-hint { margin-top: 22px; color: var(--yellow); font-size: 15px; }
+@media (prefers-reduced-motion: reduce) { .ring-box { animation: none; } }
+.callbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; display: flex; align-items: center; flex-wrap: wrap; gap: 10px 20px; padding: 12px 32px; background: var(--canvas); border-top: 2px solid var(--green); }
+.callbar .live { flex: none; width: 14px; height: 14px; background: var(--gray); }
+.callbar.on .live { background: var(--green); } .callbar.speaking .live { background: var(--red); animation: pulse 0.8s ease-in-out infinite; }
+.callbar .cstat { flex: none; font-weight: 700; }
+.callbar .vol { flex: none; width: 90px; height: 6px; background: var(--subtle); } .callbar .vol i { display: block; height: 100%; width: 0; background: var(--green); }
+.callbar .said { flex: 1; min-width: 160px; color: var(--muted); font-size: 15px; overflow-wrap: anywhere; }
+.btn.hang { border-color: var(--red); color: var(--red); padding: 6px 16px; }
+.cmode { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 14px; margin-bottom: 12px; }
+.err.web { min-height: 0; margin: -4px 0 10px; }
 /* try to fool it */
 .fool { margin-bottom: 10px; }
 .fool label { display: block; color: var(--fg); font-size: 15px; font-weight: 600; margin-bottom: 4px; }
@@ -161,6 +183,9 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
         <button class="btn yes" id="callNow" title="Call you now with the current briefing">call me now</button>
         <button class="btn" id="refresh" title="Check GitHub and cards again">refresh</button>
       </div>
+      <div class="cmode"><span>where it rings</span>
+        <div class="seg" id="cmode" title="Ring your phone, or ring this page and talk through its microphone"><button class="btn" data-m="phone" type="button">ring my phone</button><button class="btn" data-m="browser" type="button">ring this browser</button></div></div>
+      <div class="err web" id="webErr" role="status" hidden></div>
       <div class="fool"><label for="fool">try to fool it</label>
         <div class="frow"><input id="fool" type="text" spellcheck="false" maxlength="300" autocomplete="off" placeholder="Type anything that could happen, like 'prod database is at 98% disk'" title="Type anything that could happen, like 'prod database is at 98% disk'"><button class="btn go" id="foolGo" type="button">score it</button></div></div>
       <div class="demo" id="demo"><span>demo</span>
@@ -193,6 +218,22 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
   </aside>
 </div>
 
+<div class="ring" id="ring" role="alertdialog" aria-modal="true" aria-labelledby="ringTitle" hidden>
+  <div class="ring-box">
+    <div class="ring-lab">incoming call</div>
+    <div class="ring-title" id="ringTitle">Your chief of staff is calling</div>
+    <p class="ring-why" id="ringWhy"></p>
+    <div class="ring-btns"><button class="btn answer" id="ringAnswer" type="button">Answer</button><button class="btn decline" id="ringDecline" type="button">Decline</button></div>
+    <div class="ring-hint" id="ringHint" hidden>click anywhere to enable sound</div>
+  </div>
+</div>
+<div class="callbar" id="callbar" hidden>
+  <i class="live" id="callLive"></i><span class="cstat" id="callStat">connecting...</span>
+  <span class="vol"><i id="callVol"></i></span>
+  <span class="said" id="callSaid"></span>
+  <button class="btn hang" id="hangUp" type="button">Hang up</button>
+</div>
+
 <script>
 (function () {
   'use strict';
@@ -212,7 +253,7 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
   var SERVICES = [['github', 'github'], ['cards', 'plaid'], ['jev', 'jev'], ['exa', 'exa'], ['phone', 'vapi']];
   var DECISION = { call: 'call', brief: 'can wait', ignore: 'ignored' };
   function healthClass(h) {
-    return h === 'ok' ? 'ok' : (h === 'sample' || h === 'mock') ? 'warn' : String(h).indexOf('error') === 0 ? 'err' : 'off';
+    return String(h).indexOf('ok') === 0 ? 'ok' : (h === 'sample' || h === 'mock') ? 'warn' : String(h).indexOf('error') === 0 ? 'err' : 'off';
   }
   function clock(iso) {
     var d = new Date(iso); if (isNaN(d)) return '';
@@ -427,6 +468,167 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
     return d;
   }
 
+  // ---- browser calls: the Vapi Web SDK is loaded only when asked for, so phone and mock modes make no outside request ----
+  // @vapi-ai/web is an npm package with no browser bundle; jsDelivr's /+esm build serves it as an ES module.
+  var SDK_URL = 'https://cdn.jsdelivr.net/npm/@vapi-ai/web@3.1.0/+esm';
+  var NO_KEY = 'browser calls are unavailable: vapiPublicKey is not set in the settings file';
+  var sdk = { state: 'off', Vapi: null, promise: null, error: '' }; // state: off | loading | ready | failed
+  var webErrText = '';
+  function setWebErr(msg) { webErrText = msg || ''; $('webErr').hidden = !webErrText; $('webErr').textContent = webErrText; }
+  function errText(e) {
+    if (e == null) return 'unknown error';
+    if (typeof e === 'string') return e;
+    var m = (e.error && (e.error.message || e.error.errorMsg || (typeof e.error === 'string' ? e.error : ''))) || e.message || e.errorMsg || e.type || '';
+    if (m && typeof m === 'object') m = m.message || '';
+    if (!m) { try { m = JSON.stringify(e); } catch (x) { m = String(e); } }
+    return String(m).slice(0, 200);
+  }
+  function loadSdk() {
+    sdk.state = 'loading';
+    sdk.promise = Promise.race([
+      import(SDK_URL),
+      new Promise(function (_, no) { setTimeout(function () { no(new Error('timed out')); }, 15000); })
+    ]).then(function (m) {
+      // the CommonJS package comes through as the default export, with the class on its own .default
+      var V = m && m.default && (typeof m.default === 'function' ? m.default : m.default.default);
+      if (typeof V !== 'function') throw new Error('unexpected module shape');
+      sdk.Vapi = V; sdk.state = 'ready';
+    }).catch(function (e) {
+      sdk.state = 'failed';
+      sdk.error = 'browser calls are unavailable: could not load the Vapi web SDK from cdn.jsdelivr.net (' + errText(e) + ')';
+      setWebErr(sdk.error);
+    });
+  }
+  // Called on every redraw: load the SDK once when the mode is 'browser' and a public key is set
+  function syncSdk(set) {
+    if (set.callMode !== 'browser') { sdk.state = 'off'; sdk.promise = null; setWebErr(''); return; }
+    if (!set.vapiPublicKey) { setWebErr(NO_KEY); return; }
+    if (sdk.state === 'off') { setWebErr(''); loadSdk(); }
+    else if (sdk.state === 'failed') setWebErr(sdk.error);
+    else if (webErrText === NO_KEY) setWebErr('');
+  }
+
+  // ringtone: a two-burst ring made with Web Audio, no audio files
+  var actx = null, ringTimer = null;
+  function audio() {
+    if (!actx) { try { var C = window.AudioContext || window.webkitAudioContext; if (C) { actx = new C(); actx.onstatechange = onAudioState; } } catch (e) { actx = null; } }
+    return actx;
+  }
+  function unlock() {
+    var a = audio();
+    if (a && a.state === 'suspended') { try { Promise.resolve(a.resume()).catch(function () {}); } catch (e) {} }
+  }
+  ['pointerdown', 'keydown'].forEach(function (n) { document.addEventListener(n, unlock, true); });
+  function burst(t0, dur) {
+    [440, 480].forEach(function (f) {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.12, t0 + 0.03);
+      g.gain.setValueAtTime(0.12, t0 + dur - 0.05); g.gain.linearRampToValueAtTime(0, t0 + dur);
+      o.connect(g); g.connect(actx.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+    });
+  }
+  function ringOnce() {
+    // only while the context is running: nodes queued on a suspended one would all sound at once when it resumes
+    if (!actx || actx.state !== 'running') return;
+    var t = actx.currentTime + 0.02; burst(t, 0.4); burst(t + 0.6, 0.4);
+  }
+  function hint() { $('ringHint').hidden = $('ring').hidden || !actx || actx.state === 'running'; }
+  function onAudioState() { hint(); if (ringTimer) ringOnce(); }
+  function startRing() {
+    if (ringTimer) return;
+    audio(); unlock(); ringOnce();
+    ringTimer = setInterval(ringOnce, 3000);
+  }
+  function stopRing() { if (ringTimer) { clearInterval(ringTimer); ringTimer = null; } }
+
+  // the incoming-call screen: shown while the server says a call is ringing here and this page has not handled it
+  var handled = {};   // call id -> true once answered or declined on this page
+  var session = null; // the web call in progress { id, vapi, sent, hangup }
+  function drawRing() {
+    var ring = S && S.state && S.state.ring, show = !!(ring && ring.id && !handled[ring.id]);
+    var k = show ? ring.id + '|' + ring.reason : '';
+    if (k === keys.ring) return;
+    keys.ring = k;
+    $('ring').hidden = !show;
+    if (!show) { stopRing(); $('ringHint').hidden = true; return; }
+    $('ringWhy').textContent = ring.reason || ring.topic || '';
+    startRing(); hint();
+    var ae = document.activeElement;
+    if (!ae || !/^(input|textarea|select)$/i.test(ae.tagName)) $('ringAnswer').focus();
+  }
+  function bar(stat, on) { $('callbar').hidden = false; $('callStat').textContent = stat; $('callbar').classList.toggle('on', !!on); }
+  function endSession() {
+    session = null; $('callbar').hidden = true; $('callbar').classList.remove('on', 'speaking');
+    $('callSaid').textContent = ''; $('callVol').style.width = '0';
+  }
+  // The call did not start (or broke before the server heard about it): say why, tell the server, close the bar.
+  function failSession(msg, sendDecline, id) {
+    if (!session || session.id !== id) { showErr(msg); return; }
+    var v = session.vapi;
+    endSession();
+    if (v) { try { Promise.resolve(v.stop()).catch(function () {}); } catch (e) {} }
+    (sendDecline ? act({ type: 'web_declined', id: id }) : Promise.resolve()).then(function () { showErr(msg); });
+  }
+  function decline() {
+    var ring = S && S.state && S.state.ring; if (!ring || handled[ring.id]) return;
+    handled[ring.id] = true; keys.ring = null; drawRing();
+    act({ type: 'web_declined', id: ring.id });
+  }
+  function answer() {
+    var ring = S && S.state && S.state.ring; if (!ring || handled[ring.id] || session) return;
+    var id = ring.id, set = S.state.settings || {};
+    handled[id] = true; keys.ring = null; drawRing();
+    session = { id: id, vapi: null, sent: false, hangup: false };
+    bar('connecting...', false);
+    if (set.callMode !== 'browser') { failSession('browser calls are unavailable: switch to "ring this browser" first', true, id); return; }
+    if (!set.vapiPublicKey) { failSession(NO_KEY, true, id); return; }
+    if (sdk.state === 'failed' || sdk.state === 'off') { failSession(sdk.error || 'browser calls are unavailable: the Vapi web SDK is not loaded', true, id); return; }
+    Promise.resolve(sdk.promise).then(function () {
+      if (sdk.state !== 'ready') throw new Error(sdk.error || 'the web SDK did not load');
+      return act({ type: 'web_offer', id: id });
+    }).then(function (r) {
+      if (!session || session.id !== id) return null;
+      if (!r || r.ok !== true || !r.assistant) { failSession((r && r.error) || 'the call is no longer waiting to be answered', false, id); return null; }
+      var v = new sdk.Vapi(set.vapiPublicKey);
+      session.vapi = v;
+      v.on('call-start', function () { if (session && session.vapi === v) bar('on the call', true); });
+      v.on('call-end', function () { if (session && session.vapi === v) endSession(); });
+      v.on('speech-start', function () { $('callbar').classList.add('speaking'); });
+      v.on('speech-end', function () { $('callbar').classList.remove('speaking'); });
+      v.on('volume-level', function (x) { $('callVol').style.width = Math.round(Math.max(0, Math.min(1, +x || 0)) * 100) + '%'; });
+      v.on('message', function (m) {
+        if (m && m.type === 'transcript' && m.transcript) $('callSaid').textContent = (m.role === 'user' ? 'you: ' : 'chief: ') + m.transcript;
+      });
+      v.on('error', function (e) {
+        if (session && session.vapi === v && !session.sent) failSession('browser call error: ' + errText(e), true, id);
+        else showErr('browser call error: ' + errText(e));
+      });
+      return v.start(r.assistant);
+    }).then(function (call) {
+      if (call === null || !session || session.id !== id) return;
+      if (!call.id) { failSession('the browser call did not start', true, id); return; }
+      session.sent = true;
+      if (session.hangup) { try { Promise.resolve(session.vapi.stop()).catch(function () {}); } catch (e) {} }
+      return act({ type: 'web_started', id: id, vapiCallId: call.id });
+    }).catch(function (e) {
+      failSession('browser call error: ' + errText(e), !!(session && session.id === id && !session.sent), id);
+    });
+  }
+  $('ringAnswer').onclick = answer;
+  $('ringDecline').onclick = decline;
+  $('hangUp').onclick = function () {
+    if (!session) return;
+    session.hangup = true;
+    if (session.vapi) { try { Promise.resolve(session.vapi.stop()).catch(function () {}); } catch (e) {} }
+  };
+  $('cmode').onclick = function (e) {
+    var b = e.target.closest && e.target.closest('button');
+    if (!b || !b.dataset.m) return;
+    Array.prototype.forEach.call($('cmode').children, function (x) { x.classList.toggle('on', x === b); });
+    act({ type: 'set_call_mode', value: b.dataset.m });
+  };
+
   // ---- drawing ----
   function drawHealth() {
     var h = (S && S.state && S.state.health) || {}, k = JSON.stringify(h);
@@ -457,7 +659,7 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
     $('banner').textContent = live ? 'calling you now' + (live.topic ? ': ' + live.topic : '') : '';
 
     var h = st.health || {}, set = st.settings || {};
-    var sim = set.myPhoneSet === false || h.vapi === 'mock';
+    var sim = (set.myPhoneSet === false && set.callMode !== 'browser') || h.vapi === 'mock';
     $('sim').hidden = !sim;
     $('sim').textContent = sim ? 'calls are simulated until keys are added. settings file: ' + (S.settingsFile || '') : '';
 
@@ -465,6 +667,10 @@ h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; letter-spacing: .12em;
     $('notice').hidden = !n;
     $('notice').textContent = n ? 'last notification: ' + n.title + (n.body ? ' — ' + n.body : '') : '';
     syncThr();
+
+    var cm = set.callMode === 'browser' ? 'browser' : 'phone';
+    Array.prototype.forEach.call($('cmode').children, function (b) { b.classList.toggle('on', b.dataset.m === cm); });
+    syncSdk(set); drawRing();
 
     var mode = ['auto', 'ask', 'off'].indexOf(set.ordersMode) >= 0 ? set.ordersMode : 'auto';
     Array.prototype.forEach.call($('omode').children, function (b) { b.classList.toggle('on', b.dataset.m === mode); });

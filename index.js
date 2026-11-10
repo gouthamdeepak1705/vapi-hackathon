@@ -11,6 +11,7 @@ const DAY = 86400000;
 const ORDER_WINDOW = 2 * 3600000; // orders newer than this go into a call's briefing
 const ORDER_ACTIONS = ['rerun_build', 'comment', 'close_issue', 'label_urgent', 'assign_me', 'create_issue', 'mute_similar', 'dispute_charge'];
 const ORDER_MODES = ['auto', 'ask', 'off'];
+const CALL_MODES = ['phone', 'browser'];
 const DEFAULT_TIMING = {
   firstPollMs: 1500,   // first poll shortly after start
   callPollMs: 3000,    // how often an active call is checked
@@ -82,7 +83,11 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
   const iso = (t) => new Date(t).toISOString();
   const newId = (p) => `${p}-${now().toString(36)}-${(seq++).toString(36)}`;
   const threshold = () => { const t = Number(cfg().threshold); return Number.isFinite(t) ? clamp01(t) : 0.7; };
-  const noPhone = () => !!cfg().vapiKey && !String(cfg().myPhone || '').trim(); // a real key with nowhere to call
+  const callMode = () => (cfg().callMode === 'browser' ? 'browser' : 'phone');
+  const noPhone = () => !!cfg().vapiKey && callMode() === 'phone' && !String(cfg().myPhone || '').trim(); // a real key with nowhere to call
+  const isWeb = (c) => String(c.vapiId || '').startsWith('web-');
+  // A browser call that is ringing and has not been answered or declined on the page yet
+  const ringingWeb = (id) => calls.find((c) => c.id === id && c.status === 'ringing' && isWeb(c) && !c.webStep);
   const canCall = () => !!vapi && !noPhone();
   const isActive = (c) => c.status === 'ringing' || c.status === 'in-progress';
   const activeCall = () => calls.find(isActive);
@@ -120,10 +125,13 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
 
   function snapshot() {
     const c = cfg();
+    const ring = calls.find((x) => x.status === 'ringing' && isWeb(x) && !x.webStep);
     return JSON.parse(JSON.stringify({
-      events, calls: calls.map(({ placedAt, vapiId, ...pub }) => pub),
+      events, calls: calls.map(({ placedAt, vapiId, webStep, webReason, ...pub }) => pub),
       orders, mutes,
-      settings: { threshold: threshold(), myPhoneSet: !!String(c.myPhone || '').trim(), ordersMode: ordersMode(), quietHours: String(c.quietHours || ''), watches: watchList(), dailyBriefing: dailyTime() },
+      ring: ring ? { id: ring.id, topic: ring.topic, reason: ring.webReason || ring.topic } : null,
+      // vapiPublicKey is meant for browsers; the private vapiKey never goes in the state
+      settings: { threshold: threshold(), myPhoneSet: !!String(c.myPhone || '').trim(), ordersMode: ordersMode(), quietHours: String(c.quietHours || ''), watches: watchList(), dailyBriefing: dailyTime(), callMode: callMode(), vapiPublicKey: String(c.vapiPublicKey || '') },
       health: health(),
     }));
   }
@@ -332,7 +340,7 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
       const c = rec || { id: newId('call'), at: iso(now()), topic: recs.length ? clip(recs[0].title, 120) : (t || 'Summary of what is waiting'), status: 'ringing', eventIds: recs.map((r) => r.id), summary: '', mock: false };
       if (!rec) calls.unshift(c);
       if (res.ok) {
-        Object.assign(c, { status: 'ringing', at: iso(now()), placedAt: now(), vapiId: res.callId, mock: !!res.mock });
+        Object.assign(c, { status: 'ringing', at: iso(now()), placedAt: now(), vapiId: res.callId, mock: !!res.mock, webReason: res.web ? reason : undefined });
         for (const r of recs) r.status = 'calling';
         try { notify('Your chief of staff is calling',clip(reason, 120)); } catch {}
       } else {
@@ -571,6 +579,30 @@ module.exports = ({ appDataDir, profile = () => '', addNote = () => {}, onState 
           if (!ORDER_MODES.includes(a.value)) return { ok: false, error: "value must be 'auto', 'ask' or 'off'" };
           if (cfg.save) cfg.save({ ordersMode: a.value });
           changed(); return { ok: true, ordersMode: a.value };
+        }
+        case 'web_offer': {
+          const c = ringingWeb(a.id);
+          if (!c) return { ok: false, error: 'that call is not ringing in the browser' };
+          const o = vapi && vapi.offer ? vapi.offer(c.vapiId) : null;
+          if (!o || !o.assistant) return { ok: false, error: 'the call is no longer waiting to be answered' };
+          return { ok: true, assistant: o.assistant };
+        }
+        case 'web_started': {
+          const c = ringingWeb(a.id);
+          if (!c) return { ok: false, error: 'that call is not ringing in the browser' };
+          if (!vapi.attach(c.vapiId, a.vapiCallId)) return { ok: false, error: 'the call could not be linked: that call id does not look right' };
+          c.webStep = 'answered'; changed(); return { ok: true };
+        }
+        case 'web_declined': {
+          const c = ringingWeb(a.id);
+          if (!c) return { ok: false, error: 'that call is not ringing in the browser' };
+          if (vapi.decline) vapi.decline(c.vapiId);
+          c.webStep = 'declined'; changed(); return { ok: true };
+        }
+        case 'set_call_mode': {
+          if (!CALL_MODES.includes(a.value)) return { ok: false, error: "value must be 'phone' or 'browser'" };
+          if (cfg.save) cfg.save({ callMode: a.value });
+          changed(); return { ok: true, callMode: a.value };
         }
         case 'custom': {
           const text = String(a.text == null ? '' : a.text).trim();

@@ -135,6 +135,48 @@ async function main() {
       if (body.ok === false) assert.strictEqual(typeof body.error, 'string', a.type + ' failure carries an error text');
     }
 
+    // browser calls: the new actions pass through the server. In mock mode nothing rings the page, so the
+    // answers are refusals, but they are still JSON with an 'ok' field and a text error. set_call_mode writes
+    // to the temp settings file only (COS_CONFIG above).
+    assert.strictEqual((await getState(port)).state.ring, null, 'state.ring is null when nothing rings the page');
+    for (const a of [
+      { type: 'web_offer', id: 'call-none' },
+      { type: 'web_started', id: 'call-none', vapiCallId: '11111111-2222-4333-8444-555555555555' },
+      { type: 'web_declined', id: 'call-none' },
+      { type: 'set_call_mode', value: 'sideways' },
+    ]) {
+      const r = await post(port, a);
+      assert.strictEqual(r.status, 200, a.type + ' answered 200');
+      const body = JSON.parse(r.text);
+      assert.strictEqual(body.ok, false, a.type + ' is refused here: ' + r.text);
+      assert.strictEqual(typeof body.error, 'string', a.type + ' failure carries an error text');
+    }
+    const mode = JSON.parse((await post(port, { type: 'set_call_mode', value: 'browser' })).text);
+    assert.deepStrictEqual(mode, { ok: true, callMode: 'browser' });
+    assert.strictEqual((await getState(port)).state.settings.callMode, 'browser');
+    assert.strictEqual(JSON.parse(fs.readFileSync(process.env.COS_CONFIG, 'utf8')).callMode, 'browser', 'saved in the temp settings file');
+    assert.deepStrictEqual(JSON.parse((await post(port, { type: 'set_call_mode', value: 'phone' })).text), { ok: true, callMode: 'phone' });
+    // a real browser-mode ring, end to end over HTTP (fake keys: ringing and the offer never leave the machine)
+    fs.writeFileSync(process.env.COS_CONFIG, JSON.stringify({ repos: [], callMode: 'browser', vapiKey: 'PRIVATE-TEST-KEY', vapiPublicKey: 'pub-test' }));
+    const rl = JSON.parse((await post(port, { type: 'demo', scenario: 'leak' })).text);
+    assert.strictEqual(rl.ok, true);
+    let ring = null, rs = null;
+    for (let i = 0; i < 40 && !ring; i++) { rs = await getState(port); ring = rs.state.ring; if (!ring) await sleep(100); }
+    assert.ok(ring && ring.id && ring.topic && ring.reason, 'the leak rings the page: ' + JSON.stringify(ring));
+    assert.strictEqual(rs.state.settings.vapiPublicKey, 'pub-test');
+    assert.ok(!JSON.stringify(rs).includes('PRIVATE-TEST-KEY'), 'the private key is not in /state');
+    const offerRes = await post(port, { type: 'web_offer', id: ring.id });
+    const offer = JSON.parse(offerRes.text);   // the whole answer must arrive as valid JSON
+    assert.ok(offer.ok && offer.assistant && offer.assistant.model.messages[0].content.length > 1500, 'the offer carries the whole assistant');
+    assert.strictEqual(Number(offerRes.headers['content-length']), Buffer.byteLength(offerRes.text), 'nothing truncated');
+    assert.ok(!offerRes.text.includes('PRIVATE-TEST-KEY'), 'the private key is not in the offer');
+    assert.ok(JSON.parse((await post(port, { type: 'web_declined', id: ring.id })).text).ok);
+    assert.strictEqual((await getState(port)).state.ring, null, 'declined: the ring is gone');
+    fs.writeFileSync(process.env.COS_CONFIG, JSON.stringify({ repos: [] }));
+    // the page has the incoming-call screen and loads no SDK until browser mode asks for it
+    assert.ok(/id="ring"/.test(page.text) && /web_offer/.test(page.text) && /set_call_mode/.test(page.text), 'the page has the browser-call screen');
+    assert.ok(!/<script[^>]+src=/i.test(page.text) && !/<link[^>]+href=["']https?:/i.test(page.text), 'no outside request from the page itself');
+
     console.log('test-serve: all checks passed');
   } finally {
     await app.close();
