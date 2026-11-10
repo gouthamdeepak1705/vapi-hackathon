@@ -1,0 +1,12 @@
+{
+  "name": "chief-of-staff",
+  "version": "0.1.0",
+  "description": "Watches your GitHub and card charges, scores every event for urgency, and phones you only when something crosses your line.",
+  "main": "serve.js",
+  "scripts": {
+    "start": "node serve.js",
+    "test": "node test-decide.js && node test-sources.js --offline && node test-vapi.js && node test-orders.js && node test-watch.js && node test-core.js && node test-serve.js"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}

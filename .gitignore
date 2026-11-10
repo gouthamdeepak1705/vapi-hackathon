@@ -1,0 +1,4 @@
+node_modules/
+cos.json
+cos-state.json
+.env
